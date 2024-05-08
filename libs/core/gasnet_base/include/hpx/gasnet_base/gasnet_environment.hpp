@@ -83,7 +83,6 @@ namespace hpx { namespace util {
 
         static int is_initialized_;
 
-        static hpx::mutex dshm_mut;
         static int init_val_;
         static hpx::mutex* segment_mutex;
         static gasnet_seginfo_t* segments;

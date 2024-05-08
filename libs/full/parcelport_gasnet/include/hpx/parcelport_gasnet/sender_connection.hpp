@@ -67,7 +67,6 @@ namespace hpx::parcelset::policies::gasnet {
         sender_connection(sender_type* s, int dst, parcelset::parcelport* pp)
           : state_(initialized)
           , sender_(s)
-          , tag_(-1)
           , dst_(dst)
           , chunks_idx_(0)
           , ack_(0)
@@ -99,8 +98,7 @@ namespace hpx::parcelset::policies::gasnet {
                 hpx::chrono::high_resolution_clock::now();
 #endif
             chunks_idx_ = 0;
-            tag_ = acquire_tag(sender_);
-            header_ = header(buffer_, tag_);
+            header_ = header(buffer_);
             header_.assert_valid();
 
             state_ = initialized;
@@ -152,30 +150,30 @@ namespace hpx::parcelset::policies::gasnet {
                 hpx::util::gasnet_environment::scoped_lock l;
                 HPX_ASSERT(state_ == initialized);
 
-                // compute + send the number of GASNET_PAGEs to send and the
-                // remainder number of bytes to a GASNET_PAGE
-                //
-                const std::size_t chunks[] = {
-                    static_cast<size_t>(header_.data_size_ / GASNET_PAGESIZE),
-                    static_cast<size_t>(header_.data_size_ % GASNET_PAGESIZE)};
-                const std::size_t sizeof_chunks = sizeof(chunks);
-                std::memcpy(hpx::util::gasnet_environment::segments
-                                [hpx::util::gasnet_environment::rank()]
-                                    .addr,
-                    chunks, sizeof_chunks);
+                std::memcpy(
+                    static_cast<std::uint8_t*>(
+		       hpx::util::gasnet_environment::segments
+		          [hpx::util::gasnet_environment::rank()].addr
+	            ),
+                    reinterpret_cast<std::uint8_t*>(header_.data()),
+		    header_.data_size_
+		);
 
                 // put from this localities gasnet shared memory segment
                 // into the remote locality (dst_)'s shared memory segment
+		//             gasnet_put(node, static_cast<void*>(raddr), static_cast<void*>(addr), size);
+		//             gasnet_get(addr, node, raddr, size);
                 //
                 hpx::util::gasnet_environment::put(
                     static_cast<std::uint8_t*>(
                         hpx::util::gasnet_environment::segments
-                            [hpx::util::gasnet_environment::rank()]
-                                .addr),
+                            [hpx::util::gasnet_environment::rank()].addr
+	            ),
                     dst_,
                     static_cast<std::uint8_t*>(
                         hpx::util::gasnet_environment::segments[dst_].addr),
-                    sizeof_chunks);
+                    header_.data_size_
+		);
             }
 
             state_ = sent_header;
@@ -195,22 +193,29 @@ namespace hpx::parcelset::policies::gasnet {
             if (!chunks.empty())
             {
                 hpx::util::gasnet_environment::scoped_lock l;
-                std::memcpy(hpx::util::gasnet_environment::segments
-                                [hpx::util::gasnet_environment::rank()]
-                                    .addr,
+                std::memcpy(
+                   static_cast<std::uint8_t*>(
+		      hpx::util::gasnet_environment::segments
+                         [hpx::util::gasnet_environment::rank()].addr
+	            ),
                     chunks.data(),
                     static_cast<int>(chunks.size() *
-                        sizeof(parcel_buffer_type::transmission_chunk_type)));
+                        sizeof(parcel_buffer_type::transmission_chunk_type))
+		);
 
-                gasnet_put_bulk(dst_,
+                gasnet_put_bulk(
+		    dst_,
                     static_cast<std::uint8_t*>(
-                        hpx::util::gasnet_environment::segments[dst_].addr),
+                        hpx::util::gasnet_environment::segments[dst_].addr
+		    ),
                     static_cast<std::uint8_t*>(
                         hpx::util::gasnet_environment::segments
-                            [hpx::util::gasnet_environment::rank()]
-                                .addr),
+                            [hpx::util::gasnet_environment::rank()].addr
+	            ),
                     static_cast<int>(chunks.size() *
-                        sizeof(parcel_buffer_type::transmission_chunk_type)));
+                        sizeof(parcel_buffer_type::transmission_chunk_type)
+	            )
+		);
             }
 
             state_ = sent_transmission_chunks;
@@ -228,19 +233,24 @@ namespace hpx::parcelset::policies::gasnet {
             if (!header_.piggy_back())
             {
                 hpx::util::gasnet_environment::scoped_lock l;
-                std::memcpy(hpx::util::gasnet_environment::segments
-                                [hpx::util::gasnet_environment::rank()]
-                                    .addr,
-                    buffer_.data_.data(), buffer_.data_.size());
+                std::memcpy(
+                    static_cast<std::uint8_t*>(
+                       hpx::util::gasnet_environment::segments
+                          [hpx::util::gasnet_environment::rank()].addr
+		    ),
+                    buffer_.data_.data(),
+		    buffer_.data_.size()
+		);
 
                 hpx::util::gasnet_environment::put(
                     static_cast<std::uint8_t*>(
                         hpx::util::gasnet_environment::segments
-                            [hpx::util::gasnet_environment::rank()]
-                                .addr),
+			   [hpx::util::gasnet_environment::rank()].addr
+		    ),
                     dst_,
                     static_cast<std::uint8_t*>(
-                        hpx::util::gasnet_environment::segments[dst_].addr),
+                        hpx::util::gasnet_environment::segments[dst_].addr
+		    ),
                     buffer_.data_.size());
             }
             state_ = sent_data;
@@ -325,7 +335,6 @@ namespace hpx::parcelset::policies::gasnet {
 
         connection_state state_;
         sender_type* sender_;
-        int tag_;
         int dst_;
 
         using handler_type = hpx::move_only_function<void(error_code const&)>;

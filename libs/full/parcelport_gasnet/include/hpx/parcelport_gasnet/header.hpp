@@ -29,19 +29,18 @@ namespace hpx::parcelset::policies::gasnet {
 
         enum data_pos
         {
-            pos_tag = 0 * sizeof(value_type),
-            pos_size = 1 * sizeof(value_type),
-            pos_numbytes = 2 * sizeof(value_type),
-            pos_numchunks_first = 3 * sizeof(value_type),
-            pos_numchunks_second = 4 * sizeof(value_type),
-            pos_piggy_back_flag = 5 * sizeof(value_type),
+            pos_size = 0 * sizeof(value_type),
+            pos_numbytes = 1 * sizeof(value_type),
+            pos_numchunks_first = 2 * sizeof(value_type),
+            pos_numchunks_second = 3 * sizeof(value_type),
+            pos_piggy_back_flag = 4 * sizeof(value_type),
             pos_piggy_back_data = 5 * sizeof(value_type) + 1
         };
 
         static constexpr int data_size_ = 512;
 
         template <typename Buffer>
-        header(Buffer const& buffer, int tag) noexcept
+        header(Buffer const& buffer) noexcept
         {
             std::int64_t size = static_cast<std::int64_t>(buffer.size_);
             std::int64_t numbytes =
@@ -50,7 +49,7 @@ namespace hpx::parcelset::policies::gasnet {
             HPX_ASSERT(size <= (std::numeric_limits<value_type>::max)());
             HPX_ASSERT(numbytes <= (std::numeric_limits<value_type>::max)());
 
-            set<pos_tag>(tag);
+            //set<pos_tag>(tag);
             set<pos_size>(static_cast<value_type>(size));
             set<pos_numbytes>(static_cast<value_type>(numbytes));
             set<pos_numchunks_first>(
@@ -88,7 +87,7 @@ namespace hpx::parcelset::policies::gasnet {
 
         void assert_valid() const noexcept
         {
-            HPX_ASSERT(tag() != -1);
+            //HPX_ASSERT(tag() != -1);
             HPX_ASSERT(size() != -1);
             HPX_ASSERT(numbytes() != -1);
             HPX_ASSERT(num_chunks().first != -1);
@@ -100,11 +99,12 @@ namespace hpx::parcelset::policies::gasnet {
             return &data_[0];
         }
 
+/*
         value_type tag() const noexcept
         {
             return get<pos_tag>();
         }
-
+*/
         value_type size() const noexcept
         {
             return get<pos_size>();

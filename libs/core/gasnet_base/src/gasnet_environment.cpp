@@ -163,7 +163,7 @@ static void AM_copy_payload(gasnet_token_t token, void* buf, size_t nbytes,
         // associated with each node (n-node mutex)
         // will require future work
         //
-        std::lock_guard<hpx::mutex> lk(hpx::util::gasnet_environment::dshm_mut);
+        std::lock_guard<hpx::mutex> lk(hpx::util::gasnet_environment::segment_mutex[hpx::util::gasnet_environment::rank()]);
         std::memcpy(dst, buf, nbytes);
     }
 
@@ -251,7 +251,32 @@ namespace hpx::util {
     bool gasnet_environment::check_gasnet_environment(
         util::runtime_configuration const& cfg)
     {
-#if defined(HPX_HAVE_NETWORKING) && defined(HPX_HAVE_MODULE_GASNET_BASE)
+#if !defined(HPX_HAVE_NETWORKING) && defined(HPX_HAVE_PARCELPORT_GASNET)
+        return false;
+#elif defined(HPX_HAVE_MODULE_GASNET_BASE)
+        const std::string default_env{"GASNET_VERSION;GASNET_INFO;MV2_COMM_WORLD_RANK;PMI_RANK;OMPI_COMM_WORLD_SIZE;ALPS_APP_PE;PMIX_RANK;PALS_NODEID"};
+        std::string openshmem_environment_strings =
+            cfg.get_entry("hpx.parcel.openshmem.env", default_env);
+
+        hpx::string_util::char_separator sep(";,: ");
+        hpx::string_util::tokenizer tokens(openshmem_environment_strings, sep);
+        for (auto const& tok : tokens)
+        {
+            char* env = std::getenv(tok.c_str());
+            if (env)
+            {
+                LBT_(debug)
+                    << "Found OpenSHMEM environment variable: " << tok << "="
+                    << std::string(env) << ", enabling OpenSHMEM support\n";
+                return true;
+            }
+        }
+
+        LBT_(info) << "No known OpenSHMEM environment variable found, disabling "
+                      "OpenSHMEM support\n";
+
+        return false;
+#else
         // We disable the GASNET parcelport if any of these hold:
         //
         // - The parcelport is explicitly disabled
@@ -268,12 +293,12 @@ namespace hpx::util {
         {
             LBT_(info)
                 << "GASNET support disabled via configuration settings\n";
+
+            cfg.add_entry("hpx.parcel.gasnet.enable", "0");
             return false;
         }
 
         return true;
-#else
-        return false;
 #endif
     }
 }    // namespace hpx::util
@@ -283,7 +308,6 @@ namespace hpx::util {
 namespace hpx::util {
 
     hpx::spinlock gasnet_environment::pollingLock{};
-    hpx::mutex gasnet_environment::dshm_mut{};
     hpx::mutex gasnet_environment::mtx_{};
     bool gasnet_environment::enabled_ = false;
     bool gasnet_environment::has_called_init_ = false;
@@ -640,7 +664,7 @@ namespace hpx::util {
 
     int gasnet_environment::size()
     {
-        int res(-1);
+        int res(0);
         if (enabled())
             res = static_cast<int>(gasnet_nodes());
         return res;

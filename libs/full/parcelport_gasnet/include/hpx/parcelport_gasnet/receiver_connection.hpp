@@ -38,8 +38,8 @@ namespace hpx::parcelset::policies::gasnet {
             initialized,
             rcvd_transmission_chunks,
             rcvd_data,
-            rcvd_chunks,
-            sent_release_tag
+            rcvd_chunks
+            //,sent_release_tag
         };
 
         using data_type = std::vector<char>;
@@ -49,39 +49,53 @@ namespace hpx::parcelset::policies::gasnet {
         receiver_connection(int src, header h, Parcelport& pp) noexcept
           : state_(initialized)
           , src_(src)
-          , tag_(h.tag())
           , header_(h)
           , request_ptr_(false)
+	  , num_bytes(0)
+	  , need_recv_data(false)
+          , need_recv_tchunks(false)
           , chunks_idx_(0)
           , pp_(pp)
         {
             header_.assert_valid();
+
+	    num_bytes = header_.numbytes();
+
 #if defined(HPX_HAVE_PARCELPORT_COUNTERS)
             parcelset::data_point& data = buffer_.data_point_;
             data.time_ = timer_.elapsed_nanoseconds();
             data.bytes_ = static_cast<std::size_t>(header_.numbytes());
 #endif
-            buffer_.data_.resize(static_cast<std::size_t>(header_.size()));
             buffer_.num_chunks_ = header_.num_chunks();
+            buffer_.data_.resize(static_cast<std::size_t>(header_.size()));
+	    char* piggy_back_data = header_.piggy_back();
+            if (piggy_back_data)
+            {
+                need_recv_data = false;
+                memcpy(buffer_.data_.data(), piggy_back_data,
+                    buffer_.data_.size());
+            }
+            else
+            {
+                need_recv_data = true;
+            }
+            need_recv_tchunks = false;
         }
 
-        bool receive(std::size_t num_thread = -1)
+        bool receive()
         {
             switch (state_)
             {
             case initialized:
-                return receive_transmission_chunks(num_thread);
+                return receive_transmission_chunks();
 
             case rcvd_transmission_chunks:
-                return receive_data(num_thread);
+                return receive_data();
 
             case rcvd_data:
-                return receive_chunks(num_thread);
+                return receive_chunks();
 
             case rcvd_chunks:
-                return send_release_tag(num_thread);
-
-            case sent_release_tag:
                 return done();
 
             default:
@@ -90,7 +104,7 @@ namespace hpx::parcelset::policies::gasnet {
             return false;
         }
 
-        bool receive_transmission_chunks(std::size_t num_thread = -1)
+        bool receive_transmission_chunks()
         {
             auto self_ = hpx::util::gasnet_environment::rank();
 
@@ -107,22 +121,24 @@ namespace hpx::parcelset::policies::gasnet {
                 {
                     hpx::util::gasnet_environment::scoped_lock l;
                     unsigned long elem[2] = {0, 0};
-                    std::memcpy(elem,
+                    std::memcpy(
+                        reinterpret_cast<std::uint8_t*>(
+                            buffer_.transmission_chunks_.data()),
                         hpx::util::gasnet_environment::segments[self_].addr,
                         static_cast<int>(buffer_.transmission_chunks_.size() *
-                            sizeof(buffer_type::transmission_chunk_type)));
-                    buffer_.transmission_chunks_.data()->first = elem[0];
-                    buffer_.transmission_chunks_.data()->second = elem[1];
+                            sizeof(buffer_type::transmission_chunk_type))
+                    );
+
                     request_ptr_ = true;
                 }
             }
 
             state_ = rcvd_transmission_chunks;
 
-            return receive_data(num_thread);
+            return receive_data();
         }
 
-        bool receive_data(std::size_t num_thread = -1)
+        bool receive_data()
         {
             if (!request_done())
             {
@@ -139,19 +155,26 @@ namespace hpx::parcelset::policies::gasnet {
             {
                 auto self_ = hpx::util::gasnet_environment::rank();
                 hpx::util::gasnet_environment::scoped_lock l;
-                std::memcpy(buffer_.data_.data(),
+                std::memcpy(
+	            reinterpret_cast<std::uint8_t*>(buffer_.data_.data()),
                     hpx::util::gasnet_environment::segments[self_].addr,
-                    buffer_.data_.size());
+                    buffer_.data_.size()
+		);
+
                 request_ptr_ = true;
             }
 
             state_ = rcvd_data;
 
-            return receive_chunks(num_thread);
+            return receive_chunks();
         }
 
-        bool receive_chunks(std::size_t num_thread = -1)
+        bool receive_chunks()
         {
+	    std::size_t cidx = 0;
+            std::size_t chunk_size = 0;
+            const auto self_ = hpx::util::gasnet_environment::rank();
+
             while (chunks_idx_ < buffer_.chunks_.size())
             {
                 if (!request_done())
@@ -159,49 +182,24 @@ namespace hpx::parcelset::policies::gasnet {
                     return false;
                 }
 
-                std::size_t idx = chunks_idx_++;
-                std::size_t chunk_size =
-                    buffer_.transmission_chunks_[idx].second;
+                cidx = chunks_idx_++;
+                chunk_size =
+                    buffer_.transmission_chunks_[cidx].second;
 
-                data_type& c = buffer_.chunks_[idx];
+                data_type& c = buffer_.chunks_[cidx];
                 c.resize(chunk_size);
                 {
-                    auto self_ = hpx::util::gasnet_environment::rank();
                     hpx::util::gasnet_environment::scoped_lock l;
-                    std::memcpy(c.data(),
+                    std::memcpy(
+		        reinterpret_cast<std::uint8_t*>(c.data()),
                         hpx::util::gasnet_environment::segments[self_].addr,
-                        c.size());
+                        c.size()
+		    );
                     request_ptr_ = true;
                 }
             }
 
             state_ = rcvd_chunks;
-
-            return send_release_tag(num_thread);
-        }
-
-        bool send_release_tag(std::size_t num_thread = -1)
-        {
-            if (!request_done())
-            {
-                return false;
-            }
-#if defined(HPX_HAVE_PARCELPORT_COUNTERS)
-            parcelset::data_point& data = buffer_.data_point_;
-            data.time_ = timer_.elapsed_nanoseconds() - data.time_;
-#endif
-            {
-                auto self_ = hpx::util::gasnet_environment::rank();
-                hpx::util::gasnet_environment::scoped_lock l;
-                std::memcpy(&tag_,
-                    hpx::util::gasnet_environment::segments[self_].addr,
-                    sizeof(int));
-                request_ptr_ = true;
-            }
-
-            decode_parcels(pp_, HPX_MOVE(buffer_), num_thread);
-
-            state_ = sent_release_tag;
 
             return done();
         }
@@ -219,7 +217,7 @@ namespace hpx::parcelset::policies::gasnet {
                 return false;
             }
 
-            return request_ptr_;
+            return true;
         }
 
 #if defined(HPX_HAVE_PARCELPORT_COUNTERS)
@@ -228,11 +226,14 @@ namespace hpx::parcelset::policies::gasnet {
         connection_state state_;
 
         int src_;
-        int tag_;
+
         header header_;
         buffer_type buffer_;
 
         bool request_ptr_;
+	std::size_t num_bytes;
+        bool need_recv_data;
+        bool need_recv_tchunks;
         std::size_t chunks_idx_;
 
         Parcelport& pp_;

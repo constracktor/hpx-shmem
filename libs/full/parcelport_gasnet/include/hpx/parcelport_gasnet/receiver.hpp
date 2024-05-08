@@ -37,36 +37,16 @@ namespace hpx::parcelset::policies::gasnet {
         using connection_ptr = std::shared_ptr<connection_type>;
         using connection_list = std::deque<connection_ptr>;
 
-        struct exp_backoff
-        {
-            int numTries;
-            const static int maxRetries = 10;
-
-            void operator()()
-            {
-                if (numTries <= maxRetries)
-                {
-                    gasnet_AMPoll();
-                    hpx::this_thread::suspend(
-                        std::chrono::microseconds(1 << numTries));
-                }
-                else
-                {
-                    numTries = 0;
-                }
-            }
-        };
-
         explicit constexpr receiver(Parcelport& pp) noexcept
-          : pp_(pp)
-          , bo()
+          : pp_(pp), headers_mtx_{}, rcv_header_{}, handles_header_mtx_{},
+	    handles_header_{}, connections_mtx_{}, connections_{}
         {
         }
 
         void run() noexcept
         {
             util::gasnet_environment::scoped_lock l;
-            new_header();
+            post_new_header(l);
         }
 
         bool background_work() noexcept
@@ -117,36 +97,55 @@ namespace hpx::parcelset::policies::gasnet {
         template <typename Lock>
         connection_ptr accept_locked(Lock& header_lock) noexcept
         {
-            connection_ptr res;
             util::gasnet_environment::scoped_try_lock l;
+
+#if defined(HPX_MSVC)
+#pragma warning(push)
+#pragma warning(disable : 26110)
+#endif
 
             if (l.locked)
             {
-                header h = new_header();
+                const auto idx = post_new_header(l);
+		header h = rcv_header_;
+                rcv_header_.reset();
+
                 l.unlock();
                 header_lock.unlock();
 
                 // remote localities 'put' into the gasnet shared
                 // memory segment on this machine
                 //
-                res.reset(new connection_type(
-                    hpx::util::gasnet_environment::rank(), h, pp_));
-                return res;
+		return std::make_shared<connection_type>(
+                    idx, HPX_MOVE(h), pp_);
             }
-            return res;
+
+#if defined(HPX_MSVC)
+#pragma warning(pop)
+#endif
+
+            return {};
         }
 
-        header new_header() noexcept
+	template <typename Lock>
+        std::size_t post_new_header([[maybe_unused]] Lock& l) noexcept
         {
-            header h = rcv_header_;
+            HPX_ASSERT_OWNS_LOCK(l);
+	    const auto self_ = hpx::util::gasnet_environment::rank();
             rcv_header_.reset();
 
-            while (rcv_header_.data() == 0)
+	    auto & mtx_ = hpx::util::gasnet_environment::segment_mutex
+               [hpx::util::gasnet_environment::rank()];
+	    bool locked = true;
+
+            while (rcv_header_.data() == 0 && locked == false)
             {
-                bo();
+	        locked = mtx_.try_lock();
             }
 
-            return h;
+	    HPX_ASSERT_LOCKED(l, idx < 0);
+
+            return self_;
         }
 
         Parcelport& pp_;
@@ -159,7 +158,6 @@ namespace hpx::parcelset::policies::gasnet {
 
         hpx::spinlock connections_mtx_;
         connection_list connections_;
-        exp_backoff bo;
     };
 
 }    // namespace hpx::parcelset::policies::gasnet
